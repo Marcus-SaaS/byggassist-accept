@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/accept/(.*)",
+      "destination": "/accept/index.html"
+    },
+    {
+      "source": "/decline/(.*)",
+      "destination": "/decline/index.html"
+    }
+  ]
+}
