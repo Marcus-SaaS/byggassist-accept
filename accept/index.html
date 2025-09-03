@@ -22,7 +22,7 @@ const ENDPOINT = "/publicAccept";
   const v = document.getElementById("view");
   if(!token){ v.textContent = "Saknar token i URL:en."; return; }
   v.textContent = "Bearbetar…";
-  fetch(API_BASE + ENDPOINT + "?token=" + encodeURIComponent(token), { method: "GET" })
+  fetch(API_BASE + ENDPOINT + "?token=" + encodeURIComponent(token), { method:"POST" })
     .then((r)=>{ if(!r.ok) throw new Error("HTTP "+r.status); v.innerHTML="<h1>Tack!</h1><p>Offerten är nu <b>accepterad</b>.</p>"; })
     .catch(()=>{ v.innerHTML="<h1>Tack!</h1><p>Vi kunde inte bekräfta mot servern just nu, men din accept registreras visuellt.</p>"; });
 })();
