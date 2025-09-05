@@ -34,7 +34,7 @@
     .then(r => r.json())
     .then(r => {
       if (!r.ok) throw new Error(r.error || "Något gick fel");
-      v.innerHTML = "<h1>Tack!</h1><p>Offerten är nu <b>accepterad</b>.</p>";
+      v.innerHTML = "<h1>Tack!</h1><p>Offerten är nu <b>avslagen</b>.</p>";
     })
     .catch(() => {
       v.innerHTML = "<h1>Tack!</h1><p>Vi kunde inte bekräfta mot servern just nu, men din accept registreras visuellt.</p>";
