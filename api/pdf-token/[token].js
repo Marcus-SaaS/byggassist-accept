@@ -1,101 +1,135 @@
 export const config = { runtime: "nodejs" };
 
+// Minimal MVP: hämta offert-data publikt via token (justera endpoints om det behövs)
+// och generera en enkel PDF som alltid funkar för kundlänken.
 const UPSTREAM_BASE =
   process.env.UPSTREAM_BASE ||
   "https://preview--bygg-assist-78c09474.base44.app";
 
-async function fetchCandidate(url) {
-  const r = await fetch(url, {
-    cache: "no-store",
-    // hinta att vi vill ha pdf – vissa backends bryr sig
-    headers: { Accept: "application/pdf,*/*;q=0.9" },
-    redirect: "follow",
-  });
-  const ct = r.headers.get("content-type") || "";
-  return { r, ct, url };
+// 👉 Justera dessa till din riktiga publika endpoint när du vet exakt.
+// Vi testar några vanliga varianter – första som svarar JSON används.
+async function fetchQuoteByToken(token) {
+  const candidates = [
+    `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
+    `${UPSTREAM_BASE}/api/public/quotes/by-token/${encodeURIComponent(token)}`,
+    `${UPSTREAM_BASE}/api/public/quote?token=${encodeURIComponent(token)}`,
+  ];
+  for (const url of candidates) {
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) continue;
+      const ct = (r.headers.get("content-type") || "").toLowerCase();
+      if (!ct.includes("application/json")) continue;
+      const data = await r.json();
+      return data?.quote ? data : { quote: data }; // normalize shape
+    } catch {}
+  }
+  return null;
+}
+
+function normalizeQuote(data) {
+  const q = data.quote || data;
+  const items = (q.items || q.lines || []).map((x) => ({
+    name: x.name || x.title || x.item || "Rad",
+    desc: x.description || x.desc || "",
+    qty: x.quantity ?? x.qty ?? 1,
+    unitPrice: Number(x.unitPrice ?? x.price ?? x.unit_price ?? 0),
+    total: Number(x.total ?? ((x.quantity ?? 1) * (x.unitPrice ?? x.price ?? 0))),
+  }));
+  const subtotal = q.subtotal ?? items.reduce((s, x) => s + (x.total || 0), 0);
+  const vat = Number(q.vat ?? q.tax ?? 0);
+  const total = q.total ?? (subtotal + vat);
+  return {
+    number: q.number || q.no || q.id,
+    date: q.date || new Date().toLocaleDateString("sv-SE"),
+    validUntil: q.validUntil || q.valid_to || "",
+    customer: q.customer || q.client || { name: q.customerName || "" },
+    items, subtotal, vat, total,
+    notes: q.notes || q.terms || "",
+  };
+}
+
+function money(n) {
+  try { return new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK" }).format(n || 0); }
+  catch { return `${(n || 0).toFixed(2)} kr`; }
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "GET" && req.method !== "HEAD") {
-    res.setHeader("Allow", "GET, HEAD");
-    return res.status(405).json({ ok: false, error: "method_not_allowed" });
-  }
-
-  const { token, debug } = req.query;
+  const { token } = req.query;
   if (!token) return res.status(400).json({ ok: false, error: "missing token" });
-  if (!/^[a-zA-Z0-9-_]+$/.test(String(token))) {
-    return res.status(400).json({ ok: false, error: "invalid token format" });
+
+  // 1) Hämta offert-JSON publikt via token
+  const data = await fetchQuoteByToken(token);
+  if (!data) {
+    // Som fallback: visa vänligt fel så kunden aldrig får vit sida
+    res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.end(`<html><body style="font-family:system-ui;padding:24px">
+      <h1>PDF inte tillgänglig just nu</h1>
+      <p>Vi kunde inte hämta offertuppgifterna. Försök igen om en stund eller kontakta oss.</p>
+      <small>Token: ${String(token)}</small>
+    </body></html>`);
   }
+  const quote = normalizeQuote(data);
 
-  // Testa först path-varianten (troligast enligt din skärmdump),
-  // sen fallback till query-varianten.
-  const candidates = [
-    `${UPSTREAM_BASE}/functions/serveQuotePdfToken=${encodeURIComponent(token)}`,
-    `${UPSTREAM_BASE}/functions/serveQuotePdf?token=${encodeURIComponent(token)}`,
-  ];
+  // 2) Generera PDF i farten
+  const PDFDocument = (await import("pdfkit")).default;
+  res.status(200);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="offert-${quote.number || token}.pdf"`);
+  res.setHeader("Cache-Control", "no-store");
 
-  try {
-    // DEBUG-läge: hämta och visa vad upstream faktiskt svarar
-    if (debug === "1") {
-      const results = [];
-      for (const url of candidates) {
-        try {
-          const { r, ct } = await fetchCandidate(url);
-          const bodyPreview = await r.text().catch(() => "");
-          results.push({
-            url,
-            status: r.status,
-            contentType: ct,
-            ok: r.ok,
-            bodyPreview: bodyPreview.slice(0, 800),
-          });
-        } catch (e) {
-          results.push({ url, error: String(e) });
-        }
-      }
-      return res.status(200).json({ ok: true, tried: results });
-    }
+  const doc = new PDFDocument({ margin: 48 });
+  doc.pipe(res);
 
-    // PROD-läge: hitta första kandidat som faktiskt ger PDF
-    for (const url of candidates) {
-      const { r, ct } = await fetchCandidate(url);
-      if (!r.ok) continue;
-      if (!ct.toLowerCase().includes("application/pdf")) continue;
+  // Header
+  doc.fontSize(18).text("Offert", { align: "left" });
+  doc.moveDown(0.5);
+  doc.fontSize(11).fillColor("#555")
+    .text(`Offertnr: ${quote.number || "-"}`)
+    .text(`Datum: ${quote.date}`)
+    .text(`Giltig t.o.m: ${quote.validUntil || "-"}`);
+  doc.moveDown(0.8);
+  doc.fillColor("#000").fontSize(12).text("Kund", { underline: true });
+  doc.fontSize(11).fillColor("#333")
+    .text(quote.customer?.name || "-")
+    .text(quote.customer?.email || "")
+    .text(quote.customer?.phone || "");
+  doc.moveDown(1);
 
-      // HEAD support
-      if (req.method === "HEAD") {
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `inline; filename="offer-${token}.pdf"`);
-        res.setHeader("Cache-Control", "no-store");
-        return res.status(200).end();
-      }
-
-      // Streama PDF
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename="offer-${token}.pdf"`);
-      res.setHeader("Cache-Control", "no-store");
-
-      const reader = r.body.getReader();
-      res.status(200);
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
-      }
-      return res.end();
-    }
-
-    // Ingen kandidat gav PDF → returnera tydligt fel
-    return res.status(502).json({
-      ok: false,
-      error: "no_pdf_from_upstream",
-      note:
-        "Upstream responded but not with application/pdf. Check the exact function path/name.",
-      tried: candidates,
+  // Items
+  doc.fillColor("#000").fontSize(12).text("Specifikation", { underline: true });
+  doc.moveDown(0.4);
+  if (!quote.items.length) {
+    doc.fontSize(11).fillColor("#666").text("Inga rader.");
+  } else {
+    quote.items.forEach((it) => {
+      const line = [
+        it.name || "Rad",
+        it.qty != null ? `x${it.qty}` : "",
+        it.unitPrice != null ? money(it.unitPrice) : "",
+        it.total != null ? money(it.total) : "",
+      ].filter(Boolean).join("  ·  ");
+      doc.fontSize(11).fillColor("#111").text(line);
+      if (it.desc) doc.fontSize(10).fillColor("#666").text(it.desc);
+      doc.moveDown(0.2);
     });
-  } catch (e) {
-    res.status(502);
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    return res.end(JSON.stringify({ ok: false, error: "proxy_exception", detail: String(e) }));
   }
+
+  // Totals
+  doc.moveDown(0.8);
+  doc.fontSize(12).fillColor("#000").text("Summa", { underline: true });
+  doc.moveDown(0.2);
+  doc.fontSize(11).fillColor("#111").text(`Delsumma: ${money(quote.subtotal)}`);
+  doc.text(`Moms: ${money(quote.vat)}`);
+  doc.fontSize(12).text(`Att betala: ${money(quote.total)}`);
+
+  // Notes
+  if (quote.notes) {
+    doc.moveDown(1);
+    doc.fontSize(11).fillColor("#000").text("Noteringar", { underline: true });
+    doc.moveDown(0.2);
+    doc.fontSize(10).fillColor("#444").text(quote.notes);
+  }
+
+  doc.end();
 }
