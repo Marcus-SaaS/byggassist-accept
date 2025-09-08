@@ -2,7 +2,18 @@ export const config = { runtime: "nodejs" };
 
 const UPSTREAM_BASE =
   process.env.UPSTREAM_BASE ||
-  "https://preview--bygg-assist-78c09474.base44.app"; // ändra via env i Vercel när du går mot prod
+  "https://preview--bygg-assist-78c09474.base44.app";
+
+async function fetchCandidate(url) {
+  const r = await fetch(url, {
+    cache: "no-store",
+    // hinta att vi vill ha pdf – vissa backends bryr sig
+    headers: { Accept: "application/pdf,*/*;q=0.9" },
+    redirect: "follow",
+  });
+  const ct = r.headers.get("content-type") || "";
+  return { r, ct, url };
+}
 
 export default async function handler(req, res) {
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -16,72 +27,75 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false, error: "invalid token format" });
   }
 
-  // ⚠️ Byt path nedan till EXAKT den du ser i DevTools.
-  // På din bild ser det ut som en functions-route, typ:
-  //   /functions/serveQuotePdf?token=<TOKEN>
-  // eller /functions/serveQuotePdfToken=<TOKEN>
-  // Testa först varianten med query-param:
-  const upstream = `${UPSTREAM_BASE}/functions/serveQuotePdf?token=${encodeURIComponent(token)}`;
+  // Testa först path-varianten (troligast enligt din skärmdump),
+  // sen fallback till query-varianten.
+  const candidates = [
+    `${UPSTREAM_BASE}/functions/serveQuotePdfToken=${encodeURIComponent(token)}`,
+    `${UPSTREAM_BASE}/functions/serveQuotePdf?token=${encodeURIComponent(token)}`,
+  ];
 
   try {
-    // Debug-läge: hämta men streama inte
+    // DEBUG-läge: hämta och visa vad upstream faktiskt svarar
     if (debug === "1") {
-      const r2 = await fetch(upstream, { cache: "no-store" });
-      const body2 = await r2.text().catch(() => "");
-      return res.status(r2.status).json({
-        ok: r2.ok,
-        upstream,
-        note: "Debug fetch only. Not streaming.",
-        upstreamStatus: r2.status,
-        upstreamBodyPreview: body2?.slice(0, 800) || null,
-      });
+      const results = [];
+      for (const url of candidates) {
+        try {
+          const { r, ct } = await fetchCandidate(url);
+          const bodyPreview = await r.text().catch(() => "");
+          results.push({
+            url,
+            status: r.status,
+            contentType: ct,
+            ok: r.ok,
+            bodyPreview: bodyPreview.slice(0, 800),
+          });
+        } catch (e) {
+          results.push({ url, error: String(e) });
+        }
+      }
+      return res.status(200).json({ ok: true, tried: results });
     }
 
-    const r = await fetch(upstream, { cache: "no-store" });
+    // PROD-läge: hitta första kandidat som faktiskt ger PDF
+    for (const url of candidates) {
+      const { r, ct } = await fetchCandidate(url);
+      if (!r.ok) continue;
+      if (!ct.toLowerCase().includes("application/pdf")) continue;
 
-    if (!r.ok) {
-      const body = await r.text().catch(() => "");
-      return res.status(r.status).json({
-        ok: false,
-        error: "upstream_error",
-        status: r.status,
-        upstream,
-        upstreamBodyPreview: body?.slice(0, 500) || null,
-      });
-    }
+      // HEAD support
+      if (req.method === "HEAD") {
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `inline; filename="offer-${token}.pdf"`);
+        res.setHeader("Cache-Control", "no-store");
+        return res.status(200).end();
+      }
 
-    // HEAD support
-    if (req.method === "HEAD") {
+      // Streama PDF
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `inline; filename="offer-${token}.pdf"`);
       res.setHeader("Cache-Control", "no-store");
-      return res.status(200).end();
+
+      const reader = r.body.getReader();
+      res.status(200);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(Buffer.from(value));
+      }
+      return res.end();
     }
 
-    // Streama PDF
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="offer-${token}.pdf"`);
-    res.setHeader("Cache-Control", "no-store");
-
-    const reader = r.body.getReader();
-    res.status(200);
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      res.write(Buffer.from(value));
-    }
-    return res.end();
+    // Ingen kandidat gav PDF → returnera tydligt fel
+    return res.status(502).json({
+      ok: false,
+      error: "no_pdf_from_upstream",
+      note:
+        "Upstream responded but not with application/pdf. Check the exact function path/name.",
+      tried: candidates,
+    });
   } catch (e) {
     res.status(502);
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.end(`<!doctype html><html><head><meta charset="utf-8"><title>PDF not available</title>
-<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:2rem;background:#fafafa}
-.card{max-width:560px;margin:auto;background:#fff;border:1px solid #eee;border-radius:16px;padding:24px;box-shadow:0 2px 10px rgba(0,0,0,.04)}
-h1{font-size:20px;margin:0 0 8px} p{margin:8px 0 0;line-height:1.5} code{background:#f3f3f3;padding:2px 6px;border-radius:6px}</style>
-</head><body><div class="card">
-<h1>PDF not available right now</h1>
-<p>We couldn’t fetch the PDF for token <code>${String(token)}</code>. Please try again or contact support.</p>
-<p style="color:#555;margin-top:12px;">Technical detail: ${String(e)}</p>
-</div></body></html>`);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.end(JSON.stringify({ ok: false, error: "proxy_exception", detail: String(e) }));
   }
 }
