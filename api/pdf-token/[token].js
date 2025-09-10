@@ -1,4 +1,7 @@
 export const config = { runtime: "nodejs" };
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const PDFDocument = require("pdfkit");
 
 // Minimal MVP: hämta offert-data publikt via token (justera endpoints om det behövs)
 // och generera en enkel PDF som alltid funkar för kundlänken.
@@ -87,7 +90,6 @@ export default async function handler(req, res) {
   const quote = normalizeQuote(data);
 
   // 2) Generera PDF i farten
-  const PDFDocument = (await import("pdfkit")).default;
   res.status(200);
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="offert-${quote.number || token}.pdf"`);
