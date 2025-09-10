@@ -1,157 +1,203 @@
-const candidates = [
-  `${UPSTREAM_BASE}/api/public/quotes/by-token/${encodeURIComponent(token)}`, // ny
-  `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
-  `${UPSTREAM_BASE}/api/public/quote?token=${encodeURIComponent(token)}`
-];
 // /api/pdf-token/[token].js
+export const config = { runtime: "nodejs" };
+
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 const UPSTREAM_BASE =
   process.env.UPSTREAM_BASE || "https://preview--bygg-assist-78c09474.base44.app";
 
-// Try to fetch public quote JSON by token (adjust paths when you know the exact one)
-async function fetchQuoteByToken(token) {
-  const candidates = [
-    `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
-    `${UPSTREAM_BASE}/api/public/quotes/by-token/${encodeURIComponent(token)}`,
-    `${UPSTREAM_BASE}/api/public/quote?token=${encodeURIComponent(token)}`,
-  ];
-  for (const url of candidates) {
-    try {
-      const r = await fetch(url, { cache: "no-store" });
-      const ct = (r.headers.get("content-type") || "").toLowerCase();
-      if (!r.ok || !ct.includes("application/json")) continue;
-      const data = await r.json();
-      return { data, url };
-    } catch {}
+// --- helpers ---
+async function tryFetchJSON(url) {
+  const r = await fetch(url, {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+    redirect: "follow",
+  });
+  const ct = (r.headers.get("content-type") || "").toLowerCase();
+  let json = null;
+  let textPreview = "";
+  if (ct.includes("application/json")) {
+    json = await r.json().catch(() => null);
+  } else {
+    textPreview = await r.text().catch(() => "");
   }
-  return null;
-}
-
-function normalizeQuote(raw) {
-  const q = raw?.quote ?? raw ?? {};
-  const items = (q.items ?? q.lines ?? []).map((x) => ({
-    name: x.name ?? x.title ?? "Rad",
-    qty:  x.quantity ?? x.qty ?? 1,
-    unit: x.unit ?? "",
-    price: Number(x.unitPrice ?? x.price ?? 0),
-    total: Number(x.total ?? ((x.quantity ?? 1) * (x.unitPrice ?? x.price ?? 0))),
-    desc: x.description ?? x.desc ?? "",
-  }));
-  const subtotal = q.subtotal ?? items.reduce((s, it) => s + (it.total || 0), 0);
-  const vat = Number(q.vat ?? q.tax ?? 0);
-  const total = q.total ?? (subtotal + vat);
   return {
-    number: q.number ?? q.no ?? q.id ?? "",
-    date: q.date ?? new Date().toLocaleDateString("sv-SE"),
-    validUntil: q.validUntil ?? q.valid_to ?? "",
-    customer: q.customer ?? q.client ?? { name: q.customerName ?? "" },
-    items, subtotal, vat, total,
-    notes: q.notes ?? q.terms ?? "",
+    ok: r.ok,
+    status: r.status,
+    ct,
+    url,
+    json,
+    bodyPreview: textPreview.slice(0, 600),
   };
 }
 
 function money(n) {
-  try { return new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK" }).format(n || 0); }
-  catch { return `${(n || 0).toFixed(2)} kr`; }
+  const num = Number(n || 0);
+  try {
+    return new Intl.NumberFormat("sv-SE", {
+      style: "currency",
+      currency: "SEK",
+    }).format(num);
+  } catch {
+    return `${num.toFixed(2)} kr`;
+  }
+}
+
+function normalizeQuote(data) {
+  const safe = (v, d = "-") => (v === null || v === undefined || v === "" ? d : String(v));
+  if (!data) {
+    return {
+      number: "-",
+      date: new Date().toLocaleDateString("sv-SE"),
+      validUntil: "-",
+      customerLines: ["-"],
+      items: [],
+      subtotal: money(0),
+      vat: money(0),
+      total: money(0),
+      notes: "",
+    };
+  }
+
+  const q = data.quote ?? data;
+  const itemsRaw = q.items ?? q.lines ?? [];
+  const items = itemsRaw.map((x) => ({
+    name: safe(x.name ?? x.title ?? "Rad"),
+    qty: x.quantity != null ? `x${x.quantity}` : x.qty != null ? `x${x.qty}` : "",
+    price:
+      x.unitPrice != null
+        ? money(x.unitPrice)
+        : x.price != null
+        ? money(x.price)
+        : "",
+    total: x.total != null ? money(x.total) : "",
+    desc: safe(x.description ?? x.desc ?? "", ""),
+  }));
+
+  const subtotal = q.subtotal ?? itemsRaw.reduce((s, r) => s + Number(r.total || 0), 0);
+  const vat = q.vat ?? q.tax ?? 0;
+  const total = q.total ?? Number(subtotal) + Number(vat);
+
+  const cust = q.customer ?? q.client ?? { name: q.customerName ?? "" };
+  const customerLines = [cust.name, cust.email, cust.phone]
+    .filter(Boolean)
+    .map((s) => String(s));
+
+  return {
+    number: safe(q.number ?? q.no ?? q.id),
+    date: safe(q.date ?? new Date().toLocaleDateString("sv-SE")),
+    validUntil: safe(q.validUntil ?? q.valid_to),
+    customerLines,
+    items,
+    subtotal: money(subtotal),
+    vat: money(vat),
+    total: money(total),
+    notes: safe(q.notes ?? q.terms ?? "", ""),
+  };
 }
 
 export default async function handler(req, res) {
-  const { token } = req.query;
-  if (!token) {
-    res.status(400).json({ ok: false, error: "missing token" });
-    return;
-  }
-
   try {
-    // 1) Try load quote data (optional)
-    const fetched = await fetchQuoteByToken(token).catch(() => null);
-    const quote = fetched ? normalizeQuote(fetched.data) : null;
+    const { token, debug } = req.query;
+    if (!token || Array.isArray(token)) {
+      return res.status(400).json({ ok: false, error: "missing or invalid token" });
+    }
 
-    // 2) Build PDF with pdf-lib
+    // 1) Try Base44 public JSON endpoints (adjust when you have the exact one)
+    const candidates = [
+      `${UPSTREAM_BASE}/api/public/quotes/by-token/${encodeURIComponent(token)}`, // your new endpoint if created
+      `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
+      `${UPSTREAM_BASE}/api/public/quote?token=${encodeURIComponent(token)}`,
+    ];
+
+    const tried = [];
+    let quoteData = null;
+
+    for (const url of candidates) {
+      try {
+        const out = await tryFetchJSON(url);
+        tried.push(out);
+        if (
+          out.ok &&
+          out.json &&
+          (out.json.quote || out.json.items || out.json.lines)
+        ) {
+          quoteData = out.json.quote || out.json;
+          break;
+        }
+      } catch (e) {
+        tried.push({ url, error: String(e) });
+      }
+    }
+
+    if (debug === "1") {
+      return res.status(200).json({ ok: true, tried, picked: !!quoteData });
+    }
+
+    // 2) Build PDF (no crash, Helvetica only, no emojis)
     const pdf = await PDFDocument.create();
     const page = pdf.addPage([595, 842]); // A4
     const font = await pdf.embedFont(StandardFonts.Helvetica);
-    const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+    const black = rgb(0, 0, 0);
+    const dim = rgb(0.3, 0.3, 0.3);
 
+    const q = normalizeQuote(quoteData);
     let x = 50;
     let y = 792;
 
-    // Header
-    page.drawText("Offert", { x, y, size: 22, font: fontBold, color: rgb(0,0,0) }); y -= 18;
-    page.drawText(`Offertnr: ${quote?.number || "-"}`, { x, y, size: 11, font }); y -= 14;
-    page.drawText(`Datum: ${quote?.date || new Date().toLocaleDateString("sv-SE")}`, { x, y, size: 11, font }); y -= 14;
-    page.drawText(`Giltig t.o.m: ${quote?.validUntil || "-"}`, { x, y, size: 11, font }); y -= 22;
+    page.drawText("Offert", { x, y, size: 22, font, color: black });
+    y -= 22;
+    page.drawText(`Offertnr: ${q.number}`, { x, y, size: 11, font }); y -= 14;
+    page.drawText(`Datum: ${q.date}`, { x, y, size: 11, font }); y -= 14;
+    page.drawText(`Giltig t.o.m: ${q.validUntil}`, { x, y, size: 11, font }); y -= 20;
 
-    // Customer
-    page.drawText("Kund", { x, y, size: 12, font: fontBold }); y -= 14;
-    if (quote?.customer) {
-      const c = quote.customer;
-      const lines = [c.name, c.email, c.phone].filter(Boolean);
-      lines.forEach(line => { page.drawText(String(line), { x, y, size: 11, font, color: rgb(0.2,0.2,0.2) }); y -= 13; });
-    } else {
-      page.drawText("—", { x, y, size: 11, font, color: rgb(0.5,0.5,0.5) }); y -= 13;
+    page.drawText("Kund", { x, y, size: 12, font, color: black }); y -= 14;
+    for (const line of q.customerLines) {
+      page.drawText(line, { x, y, size: 11, font, color: dim }); y -= 13;
     }
-    y -= 10;
-
-    // Items
-    page.drawText("Specifikation", { x, y, size: 12, font: fontBold }); y -= 16;
-
-    const drawLine = (parts) => {
-      const [a,b,c,d] = parts;
-      page.drawText(a, { x, y, size: 11, font });
-      if (b) page.drawText(b, { x: 300, y, size: 11, font, color: rgb(0.2,0.2,0.2) });
-      if (c) page.drawText(c, { x: 360, y, size: 11, font });
-      if (d) page.drawText(d, { x: 450, y, size: 11, fontBold });
-      y -= 14;
-    };
-
-    if (quote?.items?.length) {
-      // header row
-      drawLine(["Benämning", "Antal", "À-pris", "Summa"]);
-      y -= 4;
-      quote.items.forEach(it => {
-        drawLine([
-          it.name || "Rad",
-          it.qty != null ? `x${it.qty}` : "",
-          it.price != null ? money(it.price) : "",
-          it.total != null ? money(it.total) : ""
-        ]);
-        if (it.desc) {
-          page.drawText(String(it.desc), { x, y, size: 10, font, color: rgb(0.4,0.4,0.4) }); 
-          y -= 12;
-        }
-      });
-    } else {
-      page.drawText("Inga rader.", { x, y, size: 11, font, color: rgb(0.5,0.5,0.5) }); 
-      y -= 14;
-    }
-
-    // Totals
     y -= 8;
-    page.drawText("Summa", { x, y, size: 12, font: fontBold }); y -= 16;
-    page.drawText(`Delsumma: ${money(quote?.subtotal ?? 0)}`, { x, y, size: 11, font }); y -= 14;
-    page.drawText(`Moms: ${money(quote?.vat ?? 0)}`, { x, y, size: 11, font }); y -= 14;
-    page.drawText(`Att betala: ${money(quote?.total ?? 0)}`, { x, y, size: 12, font: fontBold }); y -= 22;
 
-    // Notes or fallback message
-    if (quote?.notes) {
-      page.drawText("Noteringar", { x, y, size: 12, font: fontBold }); y -= 14;
-      page.drawText(String(quote.notes).slice(0, 600), { x, y, size: 10, font, color: rgb(0.2,0.2,0.2) });
-    } else if (!quote) {
-      page.drawText("OBS", { x, y, size: 12, font: fontBold }); y -= 14;
+    page.drawText("Specifikation", { x, y, size: 12, font, color: black }); y -= 16;
+
+    if (q.items.length) {
+      const drawItem = (it) => {
+        page.drawText(it.name, { x, y, size: 11, font, color: black });
+        if (it.qty) page.drawText(it.qty, { x: 300, y, size: 11, font, color: dim });
+        if (it.price) page.drawText(it.price, { x: 360, y, size: 11, font, color: black });
+        if (it.total) page.drawText(it.total, { x: 450, y, size: 11, font, color: black });
+      };
+      for (const it of q.items) {
+        drawItem(it); y -= 14;
+        if (it.desc) {
+          page.drawText(it.desc, { x, y, size: 10, font, color: dim }); y -= 12;
+        }
+      }
+    } else {
+      page.drawText("Inga rader.", { x, y, size: 11, font, color: dim }); y -= 14;
+    }
+
+    y -= 8;
+    page.drawText("Summa", { x, y, size: 12, font, color: black }); y -= 16;
+    page.drawText(`Delsumma: ${q.subtotal}`, { x, y, size: 11, font, color: black }); y -= 14;
+    page.drawText(`Moms: ${q.vat}`, { x, y, size: 11, font, color: black }); y -= 14;
+    page.drawText(`Att betala: ${q.total}`, { x, y, size: 12, font, color: black }); y -= 20;
+
+    if (q.notes) {
+      page.drawText("Noteringar", { x, y, size: 12, font, color: black }); y -= 14;
+      page.drawText(q.notes.slice(0, 600), { x, y, size: 10, font, color: dim });
+    } else if (!quoteData) {
+      page.drawText("OBS", { x, y, size: 12, font, color: black }); y -= 14;
       page.drawText(
         `Kunde inte hämta offertdata just nu. PDF visas i förenklad form.\nToken: ${String(token)}`,
-        { x, y, size: 10, font, color: rgb(0.4,0.2,0.2) }
+        { x, y, size: 10, font, color: dim }
       );
     }
 
     const bytes = await pdf.save();
-    res.status(200);
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="offert-${quote?.number || token}.pdf"`);
-    res.send(Buffer.from(bytes));
+    res.setHeader("Content-Disposition", `inline; filename="offert-${q.number || token}.pdf"`);
+    return res.status(200).send(Buffer.from(bytes));
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    return res.status(500).json({ ok: false, error: String(e), stack: e?.stack || null });
   }
 }
