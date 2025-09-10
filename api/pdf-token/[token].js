@@ -61,13 +61,28 @@ export default async function handler(req, res) {
   // 1) Hämta offert-JSON publikt via token
   const data = await fetchQuoteByToken(token);
   if (!data) {
-    // Som fallback: visa vänligt fel så kunden aldrig får vit sida
-    res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.end(`<html><body style="font-family:system-ui;padding:24px">
-      <h1>PDF inte tillgänglig just nu</h1>
-      <p>Vi kunde inte hämta offertuppgifterna. Försök igen om en stund eller kontakta oss.</p>
-      <small>Token: ${String(token)}</small>
-    </body></html>`);
+  const PDFDocument = (await import("pdfkit")).default;
+  res.status(200);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="offert-${String(token)}.pdf"`);
+  res.setHeader("Cache-Control", "no-store");
+
+  const doc = new PDFDocument({ margin: 48 });
+  doc.pipe(res);
+
+  doc.fontSize(18).text("Offert", { align: "left" });
+  doc.moveDown(0.5);
+  doc.fontSize(12).text("PDF inte tillgänglig just nu", { underline: true });
+  doc.moveDown(0.5);
+  doc.fontSize(10).fillColor("#444")
+    .text("Vi kunde inte hämta offertuppgifterna från servern just nu.")
+    .text("Försök igen om en stund eller kontakta oss.");
+  doc.moveDown(0.8);
+  doc.fillColor("#000").fontSize(10).text(`Token: ${String(token)}`);
+
+  doc.end();
+  return;
+}
   }
   const quote = normalizeQuote(data);
 
