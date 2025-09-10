@@ -8,7 +8,7 @@ export default async function handler(req, res) {
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
     const { height } = page.getSize();
-    page.drawText("Hej från ByggAssist 👋", {
+    page.drawText("Hej från ByggAssist", {
       x: 50,
       y: height - 100,
       size: 24,
