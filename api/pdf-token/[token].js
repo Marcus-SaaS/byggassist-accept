@@ -1,3 +1,8 @@
+const candidates = [
+  `${UPSTREAM_BASE}/api/public/quotes/by-token/${encodeURIComponent(token)}`, // ny
+  `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
+  `${UPSTREAM_BASE}/api/public/quote?token=${encodeURIComponent(token)}`
+];
 // /api/pdf-token/[token].js
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
