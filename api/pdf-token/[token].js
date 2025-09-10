@@ -1,16 +1,10 @@
-export const config = { runtime: "nodejs" };
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const PDFDocument = require("pdfkit");
+// /api/pdf-token/[token].js
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
-// Minimal MVP: hämta offert-data publikt via token (justera endpoints om det behövs)
-// och generera en enkel PDF som alltid funkar för kundlänken.
 const UPSTREAM_BASE =
-  process.env.UPSTREAM_BASE ||
-  "https://preview--bygg-assist-78c09474.base44.app";
+  process.env.UPSTREAM_BASE || "https://preview--bygg-assist-78c09474.base44.app";
 
-// 👉 Justera dessa till din riktiga publika endpoint när du vet exakt.
-// Vi testar några vanliga varianter – första som svarar JSON används.
+// Try to fetch public quote JSON by token (adjust paths when you know the exact one)
 async function fetchQuoteByToken(token) {
   const candidates = [
     `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
@@ -20,35 +14,35 @@ async function fetchQuoteByToken(token) {
   for (const url of candidates) {
     try {
       const r = await fetch(url, { cache: "no-store" });
-      if (!r.ok) continue;
       const ct = (r.headers.get("content-type") || "").toLowerCase();
-      if (!ct.includes("application/json")) continue;
+      if (!r.ok || !ct.includes("application/json")) continue;
       const data = await r.json();
-      return data?.quote ? data : { quote: data }; // normalize shape
+      return { data, url };
     } catch {}
   }
   return null;
 }
 
-function normalizeQuote(data) {
-  const q = data.quote || data;
-  const items = (q.items || q.lines || []).map((x) => ({
-    name: x.name || x.title || x.item || "Rad",
-    desc: x.description || x.desc || "",
-    qty: x.quantity ?? x.qty ?? 1,
-    unitPrice: Number(x.unitPrice ?? x.price ?? x.unit_price ?? 0),
+function normalizeQuote(raw) {
+  const q = raw?.quote ?? raw ?? {};
+  const items = (q.items ?? q.lines ?? []).map((x) => ({
+    name: x.name ?? x.title ?? "Rad",
+    qty:  x.quantity ?? x.qty ?? 1,
+    unit: x.unit ?? "",
+    price: Number(x.unitPrice ?? x.price ?? 0),
     total: Number(x.total ?? ((x.quantity ?? 1) * (x.unitPrice ?? x.price ?? 0))),
+    desc: x.description ?? x.desc ?? "",
   }));
-  const subtotal = q.subtotal ?? items.reduce((s, x) => s + (x.total || 0), 0);
+  const subtotal = q.subtotal ?? items.reduce((s, it) => s + (it.total || 0), 0);
   const vat = Number(q.vat ?? q.tax ?? 0);
   const total = q.total ?? (subtotal + vat);
   return {
-    number: q.number || q.no || q.id,
-    date: q.date || new Date().toLocaleDateString("sv-SE"),
-    validUntil: q.validUntil || q.valid_to || "",
-    customer: q.customer || q.client || { name: q.customerName || "" },
+    number: q.number ?? q.no ?? q.id ?? "",
+    date: q.date ?? new Date().toLocaleDateString("sv-SE"),
+    validUntil: q.validUntil ?? q.valid_to ?? "",
+    customer: q.customer ?? q.client ?? { name: q.customerName ?? "" },
     items, subtotal, vat, total,
-    notes: q.notes || q.terms || "",
+    notes: q.notes ?? q.terms ?? "",
   };
 }
 
@@ -59,94 +53,100 @@ function money(n) {
 
 export default async function handler(req, res) {
   const { token } = req.query;
-  if (!token) return res.status(400).json({ ok: false, error: "missing token" });
-
-  // 1) Hämta offert-JSON publikt via token
-  const data = await fetchQuoteByToken(token);
-  if (!data) {
-  const PDFDocument = (await import("pdfkit")).default;
-  res.status(200);
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename="offert-${String(token)}.pdf"`);
-  res.setHeader("Cache-Control", "no-store");
-
-  const doc = new PDFDocument({ margin: 48 });
-  doc.pipe(res);
-
-  doc.fontSize(18).text("Offert", { align: "left" });
-  doc.moveDown(0.5);
-  doc.fontSize(12).text("PDF inte tillgänglig just nu", { underline: true });
-  doc.moveDown(0.5);
-  doc.fontSize(10).fillColor("#444")
-    .text("Vi kunde inte hämta offertuppgifterna från servern just nu.")
-    .text("Försök igen om en stund eller kontakta oss.");
-  doc.moveDown(0.8);
-  doc.fillColor("#000").fontSize(10).text(`Token: ${String(token)}`);
-
-  doc.end();
-  return;
-}
-  }
-  const quote = normalizeQuote(data);
-
-  // 2) Generera PDF i farten
-  res.status(200);
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename="offert-${quote.number || token}.pdf"`);
-  res.setHeader("Cache-Control", "no-store");
-
-  const doc = new PDFDocument({ margin: 48 });
-  doc.pipe(res);
-
-  // Header
-  doc.fontSize(18).text("Offert", { align: "left" });
-  doc.moveDown(0.5);
-  doc.fontSize(11).fillColor("#555")
-    .text(`Offertnr: ${quote.number || "-"}`)
-    .text(`Datum: ${quote.date}`)
-    .text(`Giltig t.o.m: ${quote.validUntil || "-"}`);
-  doc.moveDown(0.8);
-  doc.fillColor("#000").fontSize(12).text("Kund", { underline: true });
-  doc.fontSize(11).fillColor("#333")
-    .text(quote.customer?.name || "-")
-    .text(quote.customer?.email || "")
-    .text(quote.customer?.phone || "");
-  doc.moveDown(1);
-
-  // Items
-  doc.fillColor("#000").fontSize(12).text("Specifikation", { underline: true });
-  doc.moveDown(0.4);
-  if (!quote.items.length) {
-    doc.fontSize(11).fillColor("#666").text("Inga rader.");
-  } else {
-    quote.items.forEach((it) => {
-      const line = [
-        it.name || "Rad",
-        it.qty != null ? `x${it.qty}` : "",
-        it.unitPrice != null ? money(it.unitPrice) : "",
-        it.total != null ? money(it.total) : "",
-      ].filter(Boolean).join("  ·  ");
-      doc.fontSize(11).fillColor("#111").text(line);
-      if (it.desc) doc.fontSize(10).fillColor("#666").text(it.desc);
-      doc.moveDown(0.2);
-    });
+  if (!token) {
+    res.status(400).json({ ok: false, error: "missing token" });
+    return;
   }
 
-  // Totals
-  doc.moveDown(0.8);
-  doc.fontSize(12).fillColor("#000").text("Summa", { underline: true });
-  doc.moveDown(0.2);
-  doc.fontSize(11).fillColor("#111").text(`Delsumma: ${money(quote.subtotal)}`);
-  doc.text(`Moms: ${money(quote.vat)}`);
-  doc.fontSize(12).text(`Att betala: ${money(quote.total)}`);
+  try {
+    // 1) Try load quote data (optional)
+    const fetched = await fetchQuoteByToken(token).catch(() => null);
+    const quote = fetched ? normalizeQuote(fetched.data) : null;
 
-  // Notes
-  if (quote.notes) {
-    doc.moveDown(1);
-    doc.fontSize(11).fillColor("#000").text("Noteringar", { underline: true });
-    doc.moveDown(0.2);
-    doc.fontSize(10).fillColor("#444").text(quote.notes);
+    // 2) Build PDF with pdf-lib
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage([595, 842]); // A4
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+
+    let x = 50;
+    let y = 792;
+
+    // Header
+    page.drawText("Offert", { x, y, size: 22, font: fontBold, color: rgb(0,0,0) }); y -= 18;
+    page.drawText(`Offertnr: ${quote?.number || "-"}`, { x, y, size: 11, font }); y -= 14;
+    page.drawText(`Datum: ${quote?.date || new Date().toLocaleDateString("sv-SE")}`, { x, y, size: 11, font }); y -= 14;
+    page.drawText(`Giltig t.o.m: ${quote?.validUntil || "-"}`, { x, y, size: 11, font }); y -= 22;
+
+    // Customer
+    page.drawText("Kund", { x, y, size: 12, font: fontBold }); y -= 14;
+    if (quote?.customer) {
+      const c = quote.customer;
+      const lines = [c.name, c.email, c.phone].filter(Boolean);
+      lines.forEach(line => { page.drawText(String(line), { x, y, size: 11, font, color: rgb(0.2,0.2,0.2) }); y -= 13; });
+    } else {
+      page.drawText("—", { x, y, size: 11, font, color: rgb(0.5,0.5,0.5) }); y -= 13;
+    }
+    y -= 10;
+
+    // Items
+    page.drawText("Specifikation", { x, y, size: 12, font: fontBold }); y -= 16;
+
+    const drawLine = (parts) => {
+      const [a,b,c,d] = parts;
+      page.drawText(a, { x, y, size: 11, font });
+      if (b) page.drawText(b, { x: 300, y, size: 11, font, color: rgb(0.2,0.2,0.2) });
+      if (c) page.drawText(c, { x: 360, y, size: 11, font });
+      if (d) page.drawText(d, { x: 450, y, size: 11, fontBold });
+      y -= 14;
+    };
+
+    if (quote?.items?.length) {
+      // header row
+      drawLine(["Benämning", "Antal", "À-pris", "Summa"]);
+      y -= 4;
+      quote.items.forEach(it => {
+        drawLine([
+          it.name || "Rad",
+          it.qty != null ? `x${it.qty}` : "",
+          it.price != null ? money(it.price) : "",
+          it.total != null ? money(it.total) : ""
+        ]);
+        if (it.desc) {
+          page.drawText(String(it.desc), { x, y, size: 10, font, color: rgb(0.4,0.4,0.4) }); 
+          y -= 12;
+        }
+      });
+    } else {
+      page.drawText("Inga rader.", { x, y, size: 11, font, color: rgb(0.5,0.5,0.5) }); 
+      y -= 14;
+    }
+
+    // Totals
+    y -= 8;
+    page.drawText("Summa", { x, y, size: 12, font: fontBold }); y -= 16;
+    page.drawText(`Delsumma: ${money(quote?.subtotal ?? 0)}`, { x, y, size: 11, font }); y -= 14;
+    page.drawText(`Moms: ${money(quote?.vat ?? 0)}`, { x, y, size: 11, font }); y -= 14;
+    page.drawText(`Att betala: ${money(quote?.total ?? 0)}`, { x, y, size: 12, font: fontBold }); y -= 22;
+
+    // Notes or fallback message
+    if (quote?.notes) {
+      page.drawText("Noteringar", { x, y, size: 12, font: fontBold }); y -= 14;
+      page.drawText(String(quote.notes).slice(0, 600), { x, y, size: 10, font, color: rgb(0.2,0.2,0.2) });
+    } else if (!quote) {
+      page.drawText("OBS", { x, y, size: 12, font: fontBold }); y -= 14;
+      page.drawText(
+        `Kunde inte hämta offertdata just nu. PDF visas i förenklad form.\nToken: ${String(token)}`,
+        { x, y, size: 10, font, color: rgb(0.4,0.2,0.2) }
+      );
+    }
+
+    const bytes = await pdf.save();
+    res.status(200);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="offert-${quote?.number || token}.pdf"`);
+    res.send(Buffer.from(bytes));
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
-
-  doc.end();
 }
