@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "pdfkit": "^0.14.0"
+    "pdf-lib": "^1.17.1"
   }
 }
