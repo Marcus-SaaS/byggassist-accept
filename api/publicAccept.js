@@ -1,32 +1,33 @@
+import { getBaseUrl, isValidToken } from '../../../lib/config';
+import { actionRateLimit } from '../../../lib/rate-limit';
+
 export default async function handler(req, res) {
-  if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    return res.status(200).json({ ok: true });
-  }
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
-  }
-
+  const { token } = req.query;
+  
   try {
-    const { token } = req.body || {};
-    if (!token) return res.status(400).json({ ok: false, error: "missing token" });
-
-    const upstream = process.env.BASE44_FUNCTIONS_BASE; // e.g. https://preview--bygg-assist-78c09474.base44.app/functions
-    const r = await fetch(`${upstream}/publicAccept`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token })
-    });
-
-    const text = await r.text();
-    try {
-      const json = JSON.parse(text);
-      return res.status(200).json(json);
-    } catch {
-      return res.status(502).json({ ok: false, error: "upstream-not-json", text });
+    // Rate limiting
+    const rateLimitResult = await actionRateLimit.limit(req);
+    if (!rateLimitResult.success) {
+      return res.status(429).json({ error: 'För många förfrågningar' });
     }
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    
+    if (!token || !isValidToken(token)) {
+      return res.status(400).json({ error: 'Ogiltig token' });
+    }
+
+    const UPSTREAM_BASE = getBaseUrl();
+    const response = await fetch(
+      `${UPSTREAM_BASE}/functions/publicAccept?token=${token}`,
+      { method: 'POST' }
+    );
+
+    if (response.ok) {
+      res.redirect(302, `/tack?status=accepted&token=${token}`);
+    } else {
+      res.redirect(302, `/tack?status=error&token=${token}`);
+    }
+  } catch (error) {
+    console.error('Accept Error:', error);
+    res.redirect(302, `/tack?status=error&token=${token}`);
   }
 }
