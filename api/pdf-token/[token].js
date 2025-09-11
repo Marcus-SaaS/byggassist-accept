@@ -3,7 +3,7 @@ export const config = { runtime: "nodejs" };
 
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
-// Helpers to try both token formats and both path/query variants
+// Ta bort "quote_" prefix om det finns
 const stripQuotePrefix = (t) => String(t).replace(/^quote_/, "");
 
 function buildCandidateUrls(base, token) {
@@ -11,13 +11,19 @@ function buildCandidateUrls(base, token) {
   const tNo   = encodeURIComponent(stripQuotePrefix(token));
 
   return [
-    // Base44's new function – query & path, with and without "quote_" prefix
+    // Base44's nya funktion – query & path, med och utan "quote_" prefix
     `${base}/functions/publicQuoteByToken?token=${tWith}`,
     `${base}/functions/publicQuoteByToken/${tWith}`,
     `${base}/functions/publicQuoteByToken?token=${tNo}`,
     `${base}/functions/publicQuoteByToken/${tNo}`,
 
-    // Other possible public endpoints (keep as fallbacks)
+    // Ev. JSON-flaggor om Base44 kräver det
+    `${base}/functions/publicQuoteByToken?token=${tWith}&format=json`,
+    `${base}/functions/publicQuoteByToken/${tWith}?format=json`,
+    `${base}/functions/publicQuoteByToken?token=${tNo}&format=json`,
+    `${base}/functions/publicQuoteByToken/${tNo}?format=json`,
+
+    // Fallbackar
     `${base}/api/public/quotes/by-token/${tWith}`,
     `${base}/api/public/quotes/by-token/${tNo}`,
     `${base}/api/public/quotes/by-token?token=${tWith}`,
@@ -28,6 +34,7 @@ function buildCandidateUrls(base, token) {
     `${base}/api/public/quote?token=${tNo}`,
   ];
 }
+
 
 
 const UPSTREAM_BASE =
@@ -135,28 +142,6 @@ export default async function handler(req, res) {
 // Replace the old array with this single line:
 const candidates = buildCandidateUrls(UPSTREAM_BASE, token);
 
-
-  const tried = [];
-let quoteData = null;
-
-for (const url of candidates) {
-  try {
-    const out = await tryFetchJSON(url);   // du har redan tryFetchJSON i filen
-    tried.push(out);
-    if (out.ok && out.json) {
-      // Plocka offertdata oavsett var den ligger i JSON:en
-      const maybe = pickQuoteJson
-        ? pickQuoteJson(out.json)
-        : (out.json.quote || out.json.data?.quote || out.json.result?.quote || out.json);
-      if (maybe && (maybe.items || maybe.lines || typeof maybe.total !== "undefined")) {
-        quoteData = maybe;
-        break;
-      }
-    }
-  } catch (e) {
-    tried.push({ url, error: String(e) });
-  }
-}
 
 
     if (debug === "1") {
