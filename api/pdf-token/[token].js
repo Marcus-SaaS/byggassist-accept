@@ -103,12 +103,19 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "missing or invalid token" });
     }
 
-    // 1) Try Base44 public JSON endpoints (adjust when you have the exact one)
-    const candidates = [
-      `${UPSTREAM_BASE}/api/public/quotes/by-token/${encodeURIComponent(token)}`, // your new endpoint if created
-      `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
-      `${UPSTREAM_BASE}/api/public/quote?token=${encodeURIComponent(token)}`,
-    ];
+    // högst upp i filen finns redan UPSTREAM_BASE = "https://preview--bygg-assist-78c09474.base44.app"
+
+const candidates = [
+  // 👇 BASE44’s nya publika JSON-endpoint (båda varianterna)
+  `${UPSTREAM_BASE}/functions/publicQuoteByToken?token=${encodeURIComponent(token)}`,
+  `${UPSTREAM_BASE}/functions/publicQuoteByToken/${encodeURIComponent(token)}`,
+
+  // kvar som fallbackar
+  `${UPSTREAM_BASE}/api/public/quotes/by-token/${encodeURIComponent(token)}`,
+  `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
+  `${UPSTREAM_BASE}/api/public/quote?token=${encodeURIComponent(token)}`
+];
+
 
     const tried = [];
     let quoteData = null;
