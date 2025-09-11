@@ -3,6 +3,33 @@ export const config = { runtime: "nodejs" };
 
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
+// Helpers to try both token formats and both path/query variants
+const stripQuotePrefix = (t) => String(t).replace(/^quote_/, "");
+
+function buildCandidateUrls(base, token) {
+  const tWith = encodeURIComponent(token);
+  const tNo   = encodeURIComponent(stripQuotePrefix(token));
+
+  return [
+    // Base44's new function – query & path, with and without "quote_" prefix
+    `${base}/functions/publicQuoteByToken?token=${tWith}`,
+    `${base}/functions/publicQuoteByToken/${tWith}`,
+    `${base}/functions/publicQuoteByToken?token=${tNo}`,
+    `${base}/functions/publicQuoteByToken/${tNo}`,
+
+    // Other possible public endpoints (keep as fallbacks)
+    `${base}/api/public/quotes/by-token/${tWith}`,
+    `${base}/api/public/quotes/by-token/${tNo}`,
+    `${base}/api/public/quotes/by-token?token=${tWith}`,
+    `${base}/api/public/quotes/by-token?token=${tNo}`,
+    `${base}/functions/publicGetQuoteByToken?token=${tWith}`,
+    `${base}/functions/publicGetQuoteByToken?token=${tNo}`,
+    `${base}/api/public/quote?token=${tWith}`,
+    `${base}/api/public/quote?token=${tNo}`,
+  ];
+}
+
+
 const UPSTREAM_BASE =
   process.env.UPSTREAM_BASE || "https://preview--bygg-assist-78c09474.base44.app";
 
@@ -105,37 +132,32 @@ export default async function handler(req, res) {
 
     // högst upp i filen finns redan UPSTREAM_BASE = "https://preview--bygg-assist-78c09474.base44.app"
 
-const candidates = [
-  // 👇 BASE44’s nya publika JSON-endpoint (båda varianterna)
-  `${UPSTREAM_BASE}/functions/publicQuoteByToken?token=${encodeURIComponent(token)}`,
-  `${UPSTREAM_BASE}/functions/publicQuoteByToken/${encodeURIComponent(token)}`,
-
-  // kvar som fallbackar
-  `${UPSTREAM_BASE}/api/public/quotes/by-token/${encodeURIComponent(token)}`,
-  `${UPSTREAM_BASE}/functions/publicGetQuoteByToken?token=${encodeURIComponent(token)}`,
-  `${UPSTREAM_BASE}/api/public/quote?token=${encodeURIComponent(token)}`
-];
+// Replace the old array with this single line:
+const candidates = buildCandidateUrls(UPSTREAM_BASE, token);
 
 
-    const tried = [];
-    let quoteData = null;
+  const tried = [];
+let quoteData = null;
 
-    for (const url of candidates) {
-      try {
-        const out = await tryFetchJSON(url);
-        tried.push(out);
-        if (
-          out.ok &&
-          out.json &&
-          (out.json.quote || out.json.items || out.json.lines)
-        ) {
-          quoteData = out.json.quote || out.json;
-          break;
-        }
-      } catch (e) {
-        tried.push({ url, error: String(e) });
+for (const url of candidates) {
+  try {
+    const out = await tryFetchJSON(url);   // du har redan tryFetchJSON i filen
+    tried.push(out);
+    if (out.ok && out.json) {
+      // Plocka offertdata oavsett var den ligger i JSON:en
+      const maybe = pickQuoteJson
+        ? pickQuoteJson(out.json)
+        : (out.json.quote || out.json.data?.quote || out.json.result?.quote || out.json);
+      if (maybe && (maybe.items || maybe.lines || typeof maybe.total !== "undefined")) {
+        quoteData = maybe;
+        break;
       }
     }
+  } catch (e) {
+    tried.push({ url, error: String(e) });
+  }
+}
+
 
     if (debug === "1") {
       return res.status(200).json({ ok: true, tried, picked: !!quoteData });
