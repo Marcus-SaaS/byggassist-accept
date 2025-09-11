@@ -1,8 +1,9 @@
 {
   "dependencies": {
-    "@vercel/rate-limit": "^2.0.0",   // <-- LÄGG TILL DENNA RAD
+    "@vercel/rate-limit": "^2.0.0",
     "next": "14.0.0",
     "react": "^18.0.0",
-    // ... dina andra paket
+    "pdf-lib": "^1.17.1",
+    "react-dom": "^18.0.0"
   }
 }
