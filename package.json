@@ -1,8 +1,8 @@
 {
-  "name": "byggassist-accept",
-  "version": "1.0.0",
-  "private": true,
   "dependencies": {
-    "pdf-lib": "^1.17.1"
+    "@vercel/rate-limit": "^2.0.0",   // <-- LÄGG TILL DENNA RAD
+    "next": "14.0.0",
+    "react": "^18.0.0",
+    // ... dina andra paket
   }
 }
