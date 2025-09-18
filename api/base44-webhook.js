@@ -1,6 +1,6 @@
-import { storage } from '../../lib/storage';
-
 export default async function handler(req, res) {
+  console.log('Webhook called!', new Date().toISOString());
+  
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -11,18 +11,15 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { quoteId, quoteData } = req.body;
-    const token = `quote_${quoteId}`;
-    
-    await storage.set(`quote:${token}`, quoteData, 86400);
-    
+    console.log('Request body:', req.body);
     return res.status(200).json({ 
       ok: true, 
-      message: 'Quote received',
-      token: token
+      message: 'Webhook received successfully',
+      quoteId: req.body.quoteId 
     });
     
   } catch (error) {
+    console.error('Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
