@@ -1,97 +1,79 @@
-import { getBaseUrl, isValidToken } from '../../../lib/config';
-import { pdfRateLimit } from '../../../lib/rate-limit';
-import { generatePDF } from '../../../lib/generatePDF';
+// pages/api/pdf-token/[token].js
+export const config = { runtime: "nodejs" }; // viktigt för pdf-lib
+
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+
+// Hjälp-funktioner
+const stripQuotePrefix = (t) => String(t).replace(/^quote_/, "");
+const sendJson = (res, obj, status = 200) => {
+  res.status(status).json(obj);
+};
+
+async function fetchQuoteByToken(token) {
+  const base = process.env.BASE44_URL || "https://base44.app";
+  const candidates = [
+    `${base}/functions/publicQuoteByToken?token=${encodeURIComponent(token)}`,
+    `${base}/functions/publicQuoteByToken/${encodeURIComponent(token)}`,
+    `${base}/functions/publicQuoteByToken?token=${encodeURIComponent(stripQuotePrefix(token))}`,
+    `${base}/functions/publicQuoteByToken/${encodeURIComponent(stripQuotePrefix(token))}`,
+  ];
+
+  let lastErr;
+  for (const url of candidates) {
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (r.ok) return await r.json();
+      lastErr = new Error(`Fetch ${url} -> ${r.status}`);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr ?? new Error("Quote fetch failed");
+}
+
+async function buildPdf(quote) {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([595.28, 841.89]); // A4
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const { height } = page.getSize();
+
+  page.drawText("Offert", { x: 50, y: height - 80, size: 24, font, color: rgb(0,0,0) });
+  page.drawText(`Offertnr: ${quote?.number ?? quote?.id ?? "–"}`, { x: 50, y: height - 120, size: 12, font });
+  page.drawText(`Kund: ${quote?.customer?.name ?? "–"}`, { x: 50, y: height - 140, size: 12, font });
+
+  let y = height - 180;
+  for (const item of quote?.items ?? []) {
+    const line = `${item?.name ?? "Rad"}  x${item?.qty ?? 1}  ${item?.price ?? 0} kr`;
+    page.drawText(line, { x: 50, y, size: 11, font });
+    y -= 16;
+    if (y < 80) { y = height - 100; pdf.addPage(); }
+  }
+
+  page.drawText(`Summa: ${quote?.total ?? 0} kr`, { x: 50, y: 80, size: 12, font });
+
+  return await pdf.save();
+}
 
 export default async function handler(req, res) {
+  const { token: raw } = req.query;
+  if (!raw) return sendJson(res, { error: "Missing token" }, 400);
+
+  const token = decodeURIComponent(raw);
+  const debug = req.query.debug === "1";
+
   try {
-    // Rate limiting
-    const rateLimitResult = await pdfRateLimit.limit(req);
-    if (!rateLimitResult.success) {
-      return res.status(429).json({ error: 'För många förfrågningar' });
-    }
+    const quote = await fetchQuoteByToken(token);
+    if (!quote || !quote.id) return sendJson(res, { error: "Quote not found", token }, 404);
 
-    const { token } = req.query;
-    
-    // Validera token
-    if (!token || !isValidToken(token)) {
-      return res.status(400).json({ 
-        error: 'Ogiltig token-format' 
-      });
-    }
+    if (debug) return sendJson(res, { ok: true, token, quoteId: quote.id, keys: Object.keys(quote) });
 
-    const UPSTREAM_BASE = getBaseUrl();
-    const debugMode = req.query.debug === '1';
-    const triedUrls = [];
-    let picked = false;
-    let finalData = null;
+    const pdfBytes = await buildPdf(quote);
 
-    // Testa olika URL-varianter
-    const urlVariants = [
-      `${UPSTREAM_BASE}/functions/publicQuoteByToken?token=${token}`,
-      `${UPSTREAM_BASE}/functions/publicQuoteByToken/${token}`,
-      `${UPSTREAM_BASE}/functions/publicQuoteByToken?token=${token}&format=json`,
-      `${UPSTREAM_BASE}/functions/publicQuoteByToken/${token}?format=json`
-    ];
-
-    for (const url of urlVariants) {
-      triedUrls.push(url);
-      try {
-        const response = await fetch(url, {
-          headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json'
-          }
-        });
-        
-        const contentType = response.headers.get('content-type');
-        triedUrls[triedUrls.length - 1] += ` [Status: ${response.status}, CT: ${contentType}]`;
-
-        if (response.ok && contentType && contentType.includes('application/json')) {
-          const data = await response.json();
-          finalData = data;
-          picked = true;
-          break;
-        }
-      } catch (error) {
-        triedUrls[triedUrls.length - 1] += ` [Error: ${error.message}]`;
-      }
-    }
-
-    // Fallback om ingen data hittades
-    if (!finalData) {
-      finalData = {
-        number: `BA-${Math.random().toString(36).substr(2, 5).toUpperCase()}`,
-        date: new Date().toISOString().split('T')[0],
-        customer: { name: 'Kund', email: '', phone: '' },
-        items: [{ name: 'Information saknas', quantity: 1, unitPrice: 0, total: 0 }],
-        subtotal: 0,
-        vat: 0,
-        total: 0,
-        notes: 'Kontakta säljaren för offertinformation'
-      };
-    }
-
-    if (debugMode) {
-      return res.status(200).json({
-        debug: true,
-        tried: triedUrls,
-        picked,
-        data: finalData
-      });
-    }
-
-    // Generera PDF
-    const pdfBuffer = await generatePDF(finalData);
-    
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="offert-${finalData.number}.pdf"`);
-    res.status(200).send(pdfBuffer);
-
-  } catch (error) {
-    console.error('PDF Generation Error:', error);
-    res.status(500).json({ 
-      error: 'Kunde inte generera PDF',
-      reference: `ERR-${Date.now()}`
-    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="offert_${quote.number ?? quote.id}.pdf"`);
+    res.status(200).send(Buffer.from(pdfBytes));
+  } catch (err) {
+    console.error("PDF-TOKEN error:", err);
+    sendJson(res, { error: "Internal error building PDF", message: String(err.message || err) }, 500);
   }
 }
