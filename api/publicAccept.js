@@ -8,19 +8,17 @@ export default async function handler(req, res) {
   }
 
   const token = String(req.query?.token || '');
-  // enkel token-check: kräver prefix "quote_" och minst 10 tecken
   if (!/^quote_[A-Za-z0-9_-]{6,}$/.test(token)) {
     return res.status(400).json({ ok: false, error: 'Ogiltig token' });
   }
 
-  // rate limit
   const limited = await actionRateLimit.limit(req);
   if (!limited.success) {
     return res.status(429).json({ ok: false, error: 'För många förfrågningar' });
   }
 
   try {
-    const base = process.env.BASE44_FUNCTIONS_BASE; // t.ex. https://preview--bygg-assist-78c09474.base44.app/functions
+    const base = String(process.env.BASE44_FUNCTIONS_BASE || '').trim().replace(/\/+$/, '');
     if (!base) return res.status(500).json({ ok: false, error: 'Missing env BASE44_FUNCTIONS_BASE' });
 
     const url = `${base}/publicAccept?token=${encodeURIComponent(token)}`;
