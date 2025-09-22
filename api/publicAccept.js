@@ -1,33 +1,38 @@
-import { getBaseUrl, isValidToken } from '../../../lib/config';
-import { actionRateLimit } from '../../../lib/rate-limit';
+// /api/publicAccept.js
+import { actionRateLimit } from '../lib/rate-limit.js';
 
 export default async function handler(req, res) {
-  const { token } = req.query;
-  
+  if (req.method !== 'GET') {
+    res.setHeader('Allow', 'GET');
+    return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
+  }
+
+  const token = String(req.query?.token || '');
+  // enkel token-check: kräver prefix "quote_" och minst 10 tecken
+  if (!/^quote_[A-Za-z0-9_-]{6,}$/.test(token)) {
+    return res.status(400).json({ ok: false, error: 'Ogiltig token' });
+  }
+
+  // rate limit
+  const limited = await actionRateLimit.limit(req);
+  if (!limited.success) {
+    return res.status(429).json({ ok: false, error: 'För många förfrågningar' });
+  }
+
   try {
-    // Rate limiting
-    const rateLimitResult = await actionRateLimit.limit(req);
-    if (!rateLimitResult.success) {
-      return res.status(429).json({ error: 'För många förfrågningar' });
-    }
-    
-    if (!token || !isValidToken(token)) {
-      return res.status(400).json({ error: 'Ogiltig token' });
-    }
+    const base = process.env.BASE44_FUNCTIONS_BASE; // t.ex. https://preview--bygg-assist-78c09474.base44.app/functions
+    if (!base) return res.status(500).json({ ok: false, error: 'Missing env BASE44_FUNCTIONS_BASE' });
 
-    const UPSTREAM_BASE = getBaseUrl();
-    const response = await fetch(
-      `${UPSTREAM_BASE}/functions/publicAccept?token=${token}`,
-      { method: 'POST' }
-    );
+    const url = `${base}/publicAccept?token=${encodeURIComponent(token)}`;
+    const r = await fetch(url, { method: 'POST' });
 
-    if (response.ok) {
-      res.redirect(302, `/tack?status=accepted&token=${token}`);
+    if (r.ok) {
+      return res.redirect(302, `/accept/?status=accepted&token=${encodeURIComponent(token)}`);
     } else {
-      res.redirect(302, `/tack?status=error&token=${token}`);
+      return res.redirect(302, `/accept/?status=error&token=${encodeURIComponent(token)}`);
     }
-  } catch (error) {
-    console.error('Accept Error:', error);
-    res.redirect(302, `/tack?status=error&token=${token}`);
+  } catch (e) {
+    console.error('Accept Error:', e);
+    return res.redirect(302, `/accept/?status=error&token=${encodeURIComponent(token)}`);
   }
 }
